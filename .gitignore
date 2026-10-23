@@ -4,3 +4,4 @@ sessions/
 .env
 .idea/
 .DS_Store
+*.pyc
