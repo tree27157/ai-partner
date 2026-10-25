@@ -20,7 +20,7 @@ class CharacterCard(BaseModel):
     catchphrase: str = Field(description="口头禅")
     tone: float = Field(ge=0, le=1, description="0 温柔，1 毒舌")
 
-BROKEN_EXAMPLE = True
+BROKEN_EXAMPLE = False
 
 def build_schema_example():
     if BROKEN_EXAMPLE:
@@ -43,6 +43,13 @@ def make_system_prompt():
 
 字段约束：
 {constraints}
+
+tone 取值参考（务必据此判断，不要自由发挥）：
+- 高冷、很少搭理人 → 0.15
+- 温柔体贴 → 0.3
+- 正常、不带情绪 → 0.5
+- 尖锐、爱挖苦 → 0.75
+- 毒舌、专挑痛处 → 0.9
 
 再次强调：只返回 json，不要任何解释文字。
 
@@ -71,14 +78,22 @@ def generate_card(user_input):
     ]
 
     last_error = None
+    total_prompt = total_completion = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         raw = ""
         try:
             response = call_llm(messages)
+            usage = response.usage
+            total_prompt += usage.prompt_tokens
+            total_completion += usage.completion_tokens
+            print(f"[attempt {attempt}] tokens: prompt={usage.prompt_tokens}, "
+                  f"completion={usage.completion_tokens}, total={usage.total_tokens}")
             raw = response.choices[0].message.content
             print(f"[attempt {attempt}] 模型原始值返回{raw}")
             card = parse_and_validate(raw)
-            return card
+            print(f"[generate_card] 本轮累计: prompt={total_prompt}, "
+                  f"completion={total_completion}, total={total_prompt + total_completion}")
+            return card, total_prompt, total_completion
         except json.JSONDecodeError as e:
             last_error = f"JSON 语法错误：{e}"
             print(f"[attempt{attempt}] 语法未通过：{last_error}")
@@ -100,11 +115,15 @@ def generate_card(user_input):
     raise RuntimeError(f"重试 {MAX_ATTEMPTS} 次后仍失败，最后一次错误：{last_error}")
 
 if __name__ == "__main__":
-    card = generate_card("一个温柔但偶尔毒舌的上海阿姨")
-    print("=" * 40)
-    print(f"nick_name: {card.nick_name}")
-    print(f"nature:    {card.nature}")
-    print(f"catchphrase: {card.catchphrase}")
-    print(f"tone:      {card.tone}, type: {type(card.tone)}")
-    print("=" * 40)
+    # card = generate_card("一个温柔但偶尔毒舌的上海阿姨")
+    # print("=" * 40)
+    # print(f"nick_name: {card.nick_name}")
+    # print(f"nature:    {card.nature}")
+    # print(f"catchphrase: {card.catchphrase}")
+    # print(f"tone:      {card.tone}, type: {type(card.tone)}")
+    # print("=" * 40)
     # print("校验通过：tone 是 float，能比大小、能排序、能算平均值")
+
+    sum_prompt = sum_completion = 0
+    for i in range(10):
+        card, prompt_tokens, completion_tokens = generate_card("一个温柔但偶尔毒舌的上海阿姨")
