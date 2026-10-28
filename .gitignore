@@ -5,3 +5,4 @@ sessions/
 .idea/
 .DS_Store
 *.pyc
+.env.broken
