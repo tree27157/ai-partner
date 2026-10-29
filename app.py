@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 import streamlit as st
 import os
@@ -10,7 +11,7 @@ import json
 from streamlit import session_state
 
 load_dotenv()
-MAX_MESSAGES = 20
+MAX_STEPS = 5
 # MAX_RETRIES = 3
 print("-------------->重新执行此文件，渲染展示页面")
 
@@ -24,6 +25,29 @@ st.set_page_config(
     initial_sidebar_state="expanded",
     menu_items={}
 )
+
+#工具函数
+def get_time():
+    now = datetime.now()
+    s = now.strftime("%Y-%m-%d %H:%M:%S")
+    return s
+
+def add(a, b):
+    return a + b
+
+def read_note(filename):
+    base = (Path(__file__).parent / "notes").resolve()
+    target = (base / filename).resolve()
+    if not str(target).startswith(str(base)):
+        return "错误：只能读取 notes/ 目录下的文件"
+    if not target.exists():
+        return f"错误：文件 {filename} 不存在"
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        return f"错误：读取文件失败，{e}"
+
 
 # 保存会话信息函数
 def save_session():
@@ -151,6 +175,54 @@ def generate_session_name():
 def now_iso():
     return datetime.now().isoformat(timespec="microseconds")
 
+#工具列表
+tools = [
+    {
+    "type":"function",
+    "function":{
+        "name":"get_time",
+        "description":"获取当前日期和时间，当用户询问现在是几点钟、今天几号、星期几的时候调用。",
+        "parameters":{
+            "type":"object",
+            "properties":{},
+            "required":[],
+        }
+    }
+},
+    {
+    "type":"function",
+    "function":{
+        "name":"read_note",
+        "description":"读取notes目录下的文件，当用户要询问文件的时候调用。",
+        "parameters":{
+            "type":"object",
+            "properties":{
+                "filename":{"type":"string"}
+            },
+            "required":["filename"]
+        }
+    }
+},
+    {
+    "type":"function",
+        "function":{
+        "name":"add",
+        "description":"对两个数字进行加法运算，当用户需要进行加法运算时调用。",
+        "parameters":{
+            "type":"object",
+            "properties":{
+                "a":{"type":"number"},
+                "b":{"type":"number"}
+            },
+            "required":["a", "b"]
+        }
+    }
+}
+]
+
+TOOL_MAP = {"get_time": get_time, "read_note": read_note, "add":add}
+
+
 
 #加载所有会话列表
 # def load_session_list():
@@ -163,17 +235,42 @@ def now_iso():
 #                 session_list.append(filename[:-5])
 #         session_list.sort()
 #         return session_list
+def estimate_tokens(text:str):
+    return int(len(text)/1.5) + 1
 
-def trim_history():
-    msgs = st.session_state.messages
-    max_msgs = MAX_MESSAGES - 2
-
-    if len(msgs) <= max_msgs:
+def trim_by_tokens(max_tokens: int= 6000):
+    total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
+    print(f"裁剪前tokens:{total}")
+    if total < max_tokens:
         return
-    kept = msgs[-max_msgs:]
-    while kept and kept[0]["role"]!="user":
-        kept.pop(0)
-    st.session_state.messages = kept
+    acc, start = 0, len(st.session_state.messages)
+    for i in range(len(st.session_state.messages)-1,-1,-1):
+        acc += estimate_tokens(st.session_state.messages[i].get("content" or ""))
+        if acc > max_tokens:
+            break
+        start = i
+
+    while start < len(st.session_state.messages) and st.session_state.messages[start]["role"] != "user":
+        start += 1
+
+    if start >= len(st.session_state.messages):
+        for j in range(len(st.session_state.messages) - 1, -1, -1):
+            if st.session_state.messages[j]["role"] == "user":
+                start = j
+                break
+        print("预算不足，已放宽一次以保住结构")
+    kept = st.session_state.messages[start:]
+    st.session_state.messages[:] = kept
+    new_total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
+    print(f"裁剪后tokens:{new_total}")
+
+#单条截断
+def clip_tool_result(text, limit: int = 2000) -> str:
+    s = str(text)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n\n…（内容过长已截断，原长 {len(s)} 字符）"
+
 #
 # def call_llm_with_retry(create_kwargs):
 #     """
@@ -238,6 +335,7 @@ system_prompt = """
         5.称呼用户为树哥
         6.用符合跟班性格的方式对话
         7.回复的内容，要充分体现性格特征
+        8. 需要获取当前时间、读取文件内容、做数字计算时，必须调用对应工具，不要自己猜测或编造结果。
     伴侣性格：
         - %s
     你必须遵守上述规则来回复用户
@@ -342,46 +440,81 @@ prompt = st.chat_input("请输入你的问题")
 #     st.session_state.messages.pop(0)
 #     st.session_state.messages.pop(0)
 
+def build_messages():
+    return [
+        {"role": "system", "content": system_prompt % (st.session_state.nick_name, st.session_state.nature)},
+        *st.session_state.messages,
+    ]
+
+
 if prompt:
     st.chat_message("user").write(prompt)
     print("-------------->调用AI大模型，提示词", prompt)
 
-    trim_history()
-
     #保存用户输入的提示词
     st.session_state.messages.append({"role": "user", "content": prompt})
 
+
+
     try:
-        response = client.chat.completions.create(
-            model="deepseek-flash",
-            messages=[
-                {"role": "system", "content": system_prompt % (st.session_state.nick_name, st.session_state.nature)},
-                *st.session_state.messages
-            ],
-            stream=True,
-            reasoning_effort="high",
-            extra_body={"thinking": {"type": "enabled"}}
-        )
+        for step in range(1, MAX_STEPS + 1):
+            trim_by_tokens()
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=build_messages(),
+                tools = tools
+                # stream=True,
+                # reasoning_effort="high",
+                # extra_body={"thinking": {"type": "enabled"}}
+            )
+            msg = resp.choices[0].message
 
-        # 非流式输出结果
-        # print("<--------------大模型返回结果", response.choices[0].message.content)
-        # st.chat_message("assistant").write(response.choices[0].message.content)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                **({"tool_calls": [{"id": c.id, "type": "function",
+                                    "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                                   for c in msg.tool_calls]} if msg.tool_calls else {}),
+            })
 
-        # 流式输出结果
+            if not msg.tool_calls:
+                st.chat_message("assistant").write(msg.content)
+                break
+
+            for call in msg.tool_calls:
+                args = json.loads(call.function.arguments)
+                fn = TOOL_MAP.get(call.function.name)
+                if fn is None:
+                    result = f"错误：没有名为 {call.function.name} 的工具"
+                else:
+                    try:
+                        result = fn(**args)
+                    except Exception as e:
+                        result = f"工具执行失败：{type(e).__name__}: {e}"
+
+                    st.caption(f"🔧 {call.function.name} → {str(result)[:40]}")
+
+                    st.session_state.messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": clip_tool_result(result,1000),
+                    })
+
+
 
         # 创建一个空的ChatMessage组件
-        response_message = st.empty()
-
-        full_response = ""
-        for chunk in response:
-            if chunk and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_response += content
-                response_message.chat_message("assistant").write(full_response)
-
-        # print(len(st.session_state.messages))
-        # 保存大模型返回的结果
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
+        # response_message = st.empty()
+        #
+        # full_response = ""
+        # for chunk in response:
+        #     if chunk.choices and chunk.choices[0].delta.content:
+        #         content = chunk.choices[0].delta.content
+        #         full_response += content
+        #         response_message.chat_message("assistant").write(full_response)
+        #
+        # # print(len(st.session_state.messages))
+        # # 保存大模型返回的结果
+        # st.session_state.messages.append({"role": "assistant", "content": full_response})
         print(f"打印会话长度:{len(st.session_state.messages)}")
         print(f"打印第一条对话角色：{st.session_state.messages[0]['role']}")
         print(f"打印最后一条对话角色：{st.session_state.messages[-1]['role']}")
