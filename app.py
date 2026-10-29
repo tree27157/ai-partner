@@ -492,13 +492,16 @@ if prompt:
                     except Exception as e:
                         result = f"工具执行失败：{type(e).__name__}: {e}"
 
-                    st.caption(f"🔧 {call.function.name} → {str(result)[:40]}")
+                st.caption(f"🔧 {call.function.name} → {str(result)[:40]}")
 
-                    st.session_state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": clip_tool_result(result,1000),
-                    })
+                st.session_state.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": clip_tool_result(result,1000),
+                })
+        else:
+            # 循环没被 break 打断 = 5 轮都用完了
+            st.warning(f"已达到最大步数 {MAX_STEPS}，任务未完成，已停止")
 
 
 
