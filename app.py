@@ -52,6 +52,8 @@ def read_note(filename):
 # 保存会话信息函数
 def save_session():
     # 1.保存当前会话
+    if not st.session_state.get("messages"):
+        return
     if st.session_state.current_session:
         # 构建新的会话对象
         session_data = {
@@ -125,7 +127,7 @@ def load_sessions():
 
     # ISO 8601 的字典序 = 时间顺序，直接比字符串就够，不用转成 datetime；
     # 微秒精度可以分开同一秒内创建的多个会话
-    session_list.sort(key=lambda s: s["created_at"], reverse=True)
+    session_list.sort(key=lambda s: s["created_at"], reverse=False)
     return session_list
 #加载指定会话信息函数
 def load_session(session_id):
@@ -157,10 +159,7 @@ def delete_session(session_id, label):
             st.success(f"会话 {label} 删除成功")
             # 如果删除的是当前会话，则清空当前会话信息
             if session_id == st.session_state.current_session:
-                st.session_state.messages = []
-                st.session_state.current_session = generate_session_name()
-                st.session_state.display_name = None
-                st.session_state.created_at = now_iso()
+                start_new_session()
         else:
             st.error(f"会话 {label} 不存在")
     except Exception as e:
@@ -174,6 +173,14 @@ def generate_session_name():
 #生成当前时间的 ISO 原始值（可排序、可逆解析；微秒用来区分同一秒内建的多个会话）
 def now_iso():
     return datetime.now().isoformat(timespec="microseconds")
+
+#初始化收敛函数
+def start_new_session():
+    st.session_state.messages = []
+    st.session_state.current_session = generate_session_name()
+    st.session_state.display_name = None
+    st.session_state.created_at = now_iso()
+
 
 #工具列表
 tools = [
@@ -223,18 +230,6 @@ tools = [
 TOOL_MAP = {"get_time": get_time, "read_note": read_note, "add":add}
 
 
-
-#加载所有会话列表
-# def load_session_list():
-#     session_list = []
-#     #加载session目录下的文件
-#     if os.path.exists("sessions"):
-#         file_list = os.listdir("sessions")
-#         for filename in file_list:
-#             if filename.endswith(".json"):
-#                 session_list.append(filename[:-5])
-#         session_list.sort()
-#         return session_list
 def estimate_tokens(text:str):
     return int(len(text)/1.5) + 1
 
@@ -271,52 +266,6 @@ def clip_tool_result(text, limit: int = 2000) -> str:
         return s
     return s[:limit] + f"\n\n…（内容过长已截断，原长 {len(s)} 字符）"
 
-#
-# def call_llm_with_retry(create_kwargs):
-#     """
-#     生产环境按错误类型区别处理，绝不「原地吞掉」：
-#       - 网络/超时：短暂重试（通常第二次就好）
-#       - 限流 429：等更久再重试（别硬冲）
-#       - 认证 401：重试无意义，直接失败（要改 key）
-#       - 参数 400：代码/配置错误，重试无意义，直接失败
-#     """
-#     last_error = None
-#     for attempt in range(1, MAX_RETRIES + 1):
-#         try:
-#             return client.chat.completions.create(**create_kwargs)
-#
-#         except (APIConnectionError, APITimeoutError) as e:
-#             # 网络/超时：递增等待后重试
-#             wait = attempt  # 1s, 2s, 3s
-#             st.warning(f"网络/超时异常，{wait}s 后重试（第 {attempt}/{MAX_RETRIES} 次）")
-#             print(f"[retry] 网络/超时 type={type(e).__name__} msg={e}")
-#             time.sleep(wait)
-#             last_error = e
-#
-#         except RateLimitError as e:
-#             # 限流：等更久再重试，避免继续硬冲 429
-#             wait = 5 * attempt  # 5s, 10s, 15s
-#             st.warning(f"触发限流 429，{wait}s 后重试（第 {attempt}/{MAX_RETRIES} 次）")
-#             print(f"[retry] 限流 type={type(e).__name__} msg={e}")
-#             time.sleep(wait)
-#             last_error = e
-#
-#         except AuthenticationError as e:
-#             # 认证：重试一万次也没用，必须改 key
-#             print(f"[fatal] 认证失败 type={type(e).__name__} msg={e}")
-#             raise RuntimeError("API Key 无效或未配置，请检查 .env 里的 DEEPSEEK_API_KEY") from e
-#
-#         except BadRequestError as e:
-#             # 参数：代码写错了，重试没意义
-#             print(f"[fatal] 参数错误 type={type(e).__name__} msg={e}")
-#             raise RuntimeError("请求参数错误（模型名 / 消息格式等配置问题）") from e
-#
-#     # 重试次数耗尽仍失败
-#     print(f"[fail] 重试耗尽 type={type(last_error).__name__} msg={last_error}")
-#     raise RuntimeError(f"网络异常，重试 {MAX_RETRIES} 次后仍失败") from last_error
-
-
-
 
 # 大标题
 st.title("AI智能伴侣")
@@ -341,9 +290,6 @@ system_prompt = """
     你必须遵守上述规则来回复用户
 """
 
-#初始化聊天信息
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 #昵称
 if "nick_name" not in st.session_state:
@@ -351,24 +297,15 @@ if "nick_name" not in st.session_state:
 
 #性格
 if "nature" not in st.session_state:
-    st.session_state.nature = "幽默毒舌的台湾妹子"
+    st.session_state.nature = "傲娇可爱的台湾妹子"
 
-#会话标识（uuid 主键，决定文件名）
+#初始化会话信息
 if "current_session" not in st.session_state:
-    st.session_state.current_session = generate_session_name()
+    start_new_session()
 
-#会话显示名（可选：只有重命名后才有值，默认 None，展示时由 created_at 格式化）
-if "display_name" not in st.session_state:
-    st.session_state.display_name = None
-
-#会话创建时间（ISO 原始值：既是排序依据，也是展示的数据来源）
-if "created_at" not in st.session_state:
-    st.session_state.created_at = now_iso()
 
 #展示聊天信息
 st.text(f"会话名称：{format_session_label(session_state.display_name, session_state.created_at, session_state.current_session)}")
-for message in st.session_state.messages:
-    st.chat_message(message["role"]).write(message["content"])
 
 
 
@@ -391,11 +328,7 @@ with st.sidebar:
         save_session()
 
         # 2.创建新会话：换新主键与创建时间，显示名留空（等用户重命名再填）
-        st.session_state.messages = []
-        st.session_state.current_session = generate_session_name()
-        st.session_state.display_name = None
-        st.session_state.created_at = now_iso()
-        save_session()
+        start_new_session()
         st.rerun()
 
     #会话历史
@@ -448,7 +381,6 @@ def build_messages():
 
 
 if prompt:
-    st.chat_message("user").write(prompt)
     print("-------------->调用AI大模型，提示词", prompt)
 
     #保存用户输入的提示词
@@ -478,7 +410,6 @@ if prompt:
             })
 
             if not msg.tool_calls:
-                st.chat_message("assistant").write(msg.content)
                 break
 
             for call in msg.tool_calls:
@@ -504,26 +435,13 @@ if prompt:
             st.warning(f"已达到最大步数 {MAX_STEPS}，任务未完成，已停止")
 
 
-
-        # 创建一个空的ChatMessage组件
-        # response_message = st.empty()
-        #
-        # full_response = ""
-        # for chunk in response:
-        #     if chunk.choices and chunk.choices[0].delta.content:
-        #         content = chunk.choices[0].delta.content
-        #         full_response += content
-        #         response_message.chat_message("assistant").write(full_response)
-        #
-        # # print(len(st.session_state.messages))
-        # # 保存大模型返回的结果
-        # st.session_state.messages.append({"role": "assistant", "content": full_response})
         print(f"打印会话长度:{len(st.session_state.messages)}")
         print(f"打印第一条对话角色：{st.session_state.messages[0]['role']}")
         print(f"打印最后一条对话角色：{st.session_state.messages[-1]['role']}")
 
         # 保存当前会话
         save_session()
+        st.rerun()
 
     except AuthenticationError as e:
         # 401：重试一万次也没用，必须改 key
