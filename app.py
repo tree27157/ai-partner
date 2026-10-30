@@ -99,13 +99,6 @@ def format_session_label(display_name, created_at, session_id):
 #加载所有的会话列表信息
 def load_sessions():
     session_list = []
-    # if os.path.exists("sessions"):
-    #     file_list = os.listdir("sessions")
-    #     for filename in file_list:
-    #         if filename.endswith(".json"):
-    #             session_list.append(filename[:-5])
-    # session_list.sort(reverse=True)
-    # return session_list
     if os.path.exists("sessions"):
         for filename in os.listdir("sessions"):
             if not filename.endswith(".json"):
@@ -127,7 +120,7 @@ def load_sessions():
 
     # ISO 8601 的字典序 = 时间顺序，直接比字符串就够，不用转成 datetime；
     # 微秒精度可以分开同一秒内创建的多个会话
-    session_list.sort(key=lambda s: s["created_at"], reverse=False)
+    session_list.sort(key=lambda s: s["created_at"], reverse=True)
     return session_list
 #加载指定会话信息函数
 def load_session(session_id):
@@ -306,7 +299,14 @@ if "current_session" not in st.session_state:
 
 #展示聊天信息
 st.text(f"会话名称：{format_session_label(session_state.display_name, session_state.created_at, session_state.current_session)}")
-
+for message in st.session_state.messages:
+    # 1. 只画 user 和 assistant（tool 消息不该显示成气泡）
+    if message["role"] not in ("user", "assistant"):
+        continue
+    # 2. 内容为空的 assistant（只有 tool_calls 的那种）也不画
+    if not message.get("content"):
+        continue
+    st.chat_message(message["role"]).write(message["content"])
 
 
 #调用AI大模型
@@ -380,54 +380,137 @@ def build_messages():
     ]
 
 
+def check_and_fix_messages():
+    """
+        检查并修复 messages 的两条结构不变量，返回发现的问题。
+        1. 首条必须是 user
+        2. assistant 的每个 tool_call 必须有配对的 tool 回复；孤立的 tool 消息必须删掉
+        用 if + 日志降级，不用 assert（python -O 会删掉 assert）
+        """
+    problems = []
+    msgs = st.session_state.messages
+    print("  [检查前]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
+
+    idx = 0
+    while idx < len(msgs) and msgs[idx]["role"] != "user":
+        problems.append(f"丢弃开头 {msgs[idx]['role']} 消息")
+        idx += 1
+
+    kept = []
+    for m in msgs[idx:]:
+        if m["role"] == "tool":
+            tid = m.get("tool_call_id")
+            has_call = any(
+                k["role"] == "assistant"
+                and any(tc["id"] == tid for tc in k.get("tool_calls", []))
+                for k in kept
+            )
+            if not has_call:
+                problems.append(f"丢弃孤立 tool 消息（id={tid}）")
+                continue
+        kept.append(m)
+
+    answered = {m.get("tool_call_id") for m in kept if m["role"] == "tool"}
+    repaired = []
+    for m in list(kept):
+        repaired.append(m)
+        if m["role"] == "assistant":
+            for tc in m.get("tool_calls", []):
+                if tc["id"] not in answered:
+                    problems.append(f"补占位 tool 回复（id={tc['id']}）")
+                    repaired.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": "该工具调用已被系统跳过，不要重试。请基于已有信息直接回答用户。",
+                    })
+    kept = repaired
+    msgs[:] = kept
+    print("  [检查后]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
+
+    if problems:
+        print("[结构告警]", problems)
+    return problems
+
+
 if prompt:
     print("-------------->调用AI大模型，提示词", prompt)
 
     #保存用户输入的提示词
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.chat_message("user").write(prompt)
 
 
 
     try:
         for step in range(1, MAX_STEPS + 1):
             trim_by_tokens()
-            resp = client.chat.completions.create(
+            problems = check_and_fix_messages()  
+            if problems:
+                st.warning(f"对话结构已自动修复：{problems[0]}")
+
+            print(f"--- 第 {step} 轮，共 {len(st.session_state.messages)} 条 ---")
+            for i, m in enumerate(st.session_state.messages):
+                print(i, m["role"], "TC" if m.get("tool_calls") else "", str(m.get("content"))[:40])
+
+            stream = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=build_messages(),
-                tools = tools
-                # stream=True,
+                tools = tools,
+                stream=True,
                 # reasoning_effort="high",
                 # extra_body={"thinking": {"type": "enabled"}}
             )
-            msg = resp.choices[0].message
 
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                **({"tool_calls": [{"id": c.id, "type": "function",
-                                    "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                                   for c in msg.tool_calls]} if msg.tool_calls else {}),
-            })
+            content_acc = ""
+            tool_calls_acc = {}
 
-            if not msg.tool_calls:
+            ph = None
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                if delta.content:
+                    content_acc += delta.content  # 攒正文
+                    if ph is None:  # 第一次有内容才创建
+                        bubble = st.chat_message("assistant")
+                        ph = st.empty()
+                    ph.write(content_acc)  # 后续每次覆盖同一个位置
+                for tc in (delta.tool_calls or []):
+                    slot = tool_calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                    if tc.id: slot["id"] = tc.id
+                    if tc.function and tc.function.name: slot["name"] = tc.function.name
+                    if tc.function and tc.function.arguments: slot["arguments"] += tc.function.arguments
+
+
+            assistant_msg = {"role": "assistant", "content": content_acc}
+            if tool_calls_acc:
+                assistant_msg["tool_calls"] = [
+                    {"id": s["id"], "type": "function",
+                     "function": {"name": s["name"], "arguments": s["arguments"]}}
+                    for s in tool_calls_acc.values()
+                ]
+            st.session_state.messages.append(assistant_msg)
+
+            if not assistant_msg.get("tool_calls"):
                 break
 
-            for call in msg.tool_calls:
-                args = json.loads(call.function.arguments)
-                fn = TOOL_MAP.get(call.function.name)
+            for call in assistant_msg.get("tool_calls", []):
+                args = json.loads(call["function"]["arguments"])
+                fn = TOOL_MAP.get(call["function"]["name"])
                 if fn is None:
-                    result = f"错误：没有名为 {call.function.name} 的工具"
+                    result = f"错误：没有名为 {call['function']['name']} 的工具"
                 else:
                     try:
                         result = fn(**args)
                     except Exception as e:
                         result = f"工具执行失败：{type(e).__name__}: {e}"
 
-                st.caption(f"🔧 {call.function.name} → {str(result)[:40]}")
+                st.caption(f"🔧 {call['function']['name']} → {str(result)[:40]}")
 
                 st.session_state.messages.append({
                     "role": "tool",
-                    "tool_call_id": call.id,
+                    "tool_call_id": call["id"],
                     "content": clip_tool_result(result,1000),
                 })
         else:
@@ -441,7 +524,6 @@ if prompt:
 
         # 保存当前会话
         save_session()
-        st.rerun()
 
     except AuthenticationError as e:
         # 401：重试一万次也没用，必须改 key
@@ -498,3 +580,5 @@ if prompt:
             st.session_state.messages.pop()
             print("回滚后条数:", len(st.session_state.messages), "末条:",
                   st.session_state.messages[-1]["role"] if st.session_state.messages else "空")
+    else:
+        st.rerun()
