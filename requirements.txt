@@ -2,3 +2,5 @@ streamlit
 openai
 python-dotenv
 pydantic
+sentence-transformers
+chromadb
