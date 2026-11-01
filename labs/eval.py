@@ -1,7 +1,11 @@
 """
-评测四个库（整篇 + 三种切分）在 5 个问题上的表现。
-跑法：python labs/eval.py
+评测：读 eval_set.json，对多个 collection 打分。
+用法：
+    python labs/eval.py                 # 评全部
+    python labs/eval.py notes_head      # 只评一个
 """
+import json
+import sys
 from pathlib import Path
 
 import chromadb
@@ -9,44 +13,58 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 
 ROOT = Path(__file__).resolve().parent.parent
+EVAL_SET = ROOT / "labs" / "eval_set.json"
 DB = str(ROOT / "chroma_db")
+ALL_COLLECTIONS = ["notes", "notes_fixed", "notes_head", "notes_overlap"]
+def main():
+    targets = sys.argv[1:] or ALL_COLLECTIONS
 
-# 问题 → 你事先确认过答案在哪篇
-QUESTIONS = [
-    ("进程调度有哪些算法",   "03_进程调度算法.md"),
-    ("TCP三次握手的过程",   "17_TCP协议、三次握手四次挥手.md"),
-    ("虚拟内存和分页",      "07_虚拟内存与页面置换算法.md"),
-    ("HTTP无状态是什么意思", "19_应用层：HTTP、DNS.md"),
-    ("什么是计数到无穷问题", "15_路由协议、静态路由与RIP、OSPF.md"),
-]
+    cases = json.loads(EVAL_SET.read_text(encoding="utf-8"))
+    print(f"评测集: {len(cases)} 题\n")
 
-ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="BAAI/bge-small-zh-v1.5"
-)
-client = chromadb.PersistentClient(
-    path=DB,
-    settings=Settings(anonymized_telemetry=False),
-)
+    # 期望文件必须真实存在，否则就是抄错了
+    existing = {p.name for p in (ROOT / "notes").glob("*.md")}
+    for c in cases:
+        if c["expect"] not in existing:
+            raise SystemExit(f"❌ 期望文件不存在：{c['expect']!r}\n"
+                             f"   磁盘上以 {c['expect'][:4]!r} 开头的有："
+                             f"{[n for n in existing if n.startswith(c['expect'][:4])]}")
 
-for name in ["notes", "notes_fixed", "notes_head", "notes_overlap"]:
-    try:
-        col = client.get_collection(name, embedding_function=ef)
-    except Exception:
-        print(f"跳过 {name}（不存在）")
-        continue
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="BAAI/bge-small-zh-v1.5")
+    client = chromadb.PersistentClient(
+        path=DB, settings=Settings(anonymized_telemetry=False))
 
-    hit = 0
-    print(f"\n===== {name}（{col.count()} 块） =====")
-    print(f"{'问题':<16}{'top1 文件':<26}{'dist':>8}{'margin':>9}   命中")
-    print("-" * 70)
+    for name in targets:
+        try:
+            col = client.get_collection(name, embedding_function=ef)
+        except Exception:
+            print(f"跳过 {name}（不存在）")
+            continue
 
-    for q, expect in QUESTIONS:
-        r = col.query(query_texts=[q], n_results=3)
-        files = [m["file"] for m in r["metadatas"][0]]
-        d = r["distances"][0]
-        margin = d[1] - d[0] if len(d) > 1 else 0.0
-        ok = files[0] == expect
-        hit += ok
-        print(f"{q[:14]:<16}{files[0][:24]:<26}{d[0]:>8.4f}{margin:>+9.4f}   {'✓' if ok else '✗'}")
+        hits = 0
+        hits3 = 0
+        rows = []
+        for c in cases:
+            r = col.query(query_texts=[c["q"]], n_results=3)
+            files = [m["file"] for m in r["metadatas"][0]]
+            d = r["distances"][0]
+            margin = d[1] - d[0] if len(d) > 1 else 0.0
+            ok = files[0] == c["expect"]
+            ok3 = c["expect"] in files
+            hits += ok
+            hits3 += ok3
+            rows.append((c["q"], files[0], d[0], margin, ok, ok3))
 
-    print(f"命中: {hit}/{len(QUESTIONS)}")
+
+
+        print(f"===== {name}（{col.count()} 块）: {hits}/{len(cases)} =====")
+        print(f"{'问题':<18}{'top1':<28}{'dist':>8}{'margin':>9}  命中")
+        print("-" * 76)
+        for q, f, dist, m, ok, ok3 in rows:
+            print(f"{q[:16]:<18}{f[:26]:<28}{dist:>8.4f}{m:>+9.4f}  {'✓' if ok else '✗'}{'✓' if ok3 else '-':>4}")
+        print()
+
+
+if __name__ == "__main__":
+    main()
