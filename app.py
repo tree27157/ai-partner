@@ -1,13 +1,17 @@
 import uuid
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 import os
 from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError, AuthenticationError, BadRequestError
 from dotenv import load_dotenv
 from datetime import datetime
 import json
-
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+from sentence_transformers import CrossEncoder
 from streamlit import session_state
 
 load_dotenv()
@@ -15,16 +19,24 @@ MAX_STEPS = 5
 # MAX_RETRIES = 3
 print("-------------->重新执行此文件，渲染展示页面")
 
-# 设置页面配置
-st.set_page_config(
-    page_title="AI智能伴侣",
-    page_icon="🤖",
 
-    layout="wide",
+@st.cache_resource
+def load_reranker():
+    print("----> 真正加载 reranker")
+    return CrossEncoder("BAAI/bge-reranker-base")
 
-    initial_sidebar_state="expanded",
-    menu_items={}
-)
+RERANKER = load_reranker()
+
+@st.cache_resource
+def load_store():
+    client = chromadb.PersistentClient(
+        path=str(Path(__file__).parent / "chroma_db"),
+        settings=Settings(anonymized_telemetry=False))
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="BAAI/bge-small-zh-v1.5")
+    return client.get_collection("notes_head", embedding_function=ef)
+
+COL = load_store()
 
 #工具函数
 def get_time():
@@ -38,7 +50,7 @@ def add(a, b):
 def read_note(filename):
     base = (Path(__file__).parent / "notes").resolve()
     target = (base / filename).resolve()
-    if not str(target).startswith(str(base)):
+    if not target.is_relative_to(base):
         return "错误：只能读取 notes/ 目录下的文件"
     if not target.exists():
         return f"错误：文件 {filename} 不存在"
@@ -175,6 +187,149 @@ def start_new_session():
     st.session_state.created_at = now_iso()
 
 
+def estimate_tokens(text:str):
+    return int(len(text)/1.5) + 1
+
+def trim_by_tokens(max_tokens: int= 6000):
+    total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
+    print(f"裁剪前tokens:{total}")
+    if total < max_tokens:
+        return
+    acc, start = 0, len(st.session_state.messages)
+    for i in range(len(st.session_state.messages)-1,-1,-1):
+        acc += estimate_tokens(st.session_state.messages[i].get("content" or ""))
+        if acc > max_tokens:
+            break
+        start = i
+
+    while start < len(st.session_state.messages) and st.session_state.messages[start]["role"] != "user":
+        start += 1
+
+    if start >= len(st.session_state.messages):
+        for j in range(len(st.session_state.messages) - 1, -1, -1):
+            if st.session_state.messages[j]["role"] == "user":
+                start = j
+                break
+        print("预算不足，已放宽一次以保住结构")
+    kept = st.session_state.messages[start:]
+    st.session_state.messages[:] = kept
+    new_total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
+    print(f"裁剪后tokens:{new_total}")
+
+#单条截断
+def clip_tool_result(text, limit: int = 2000) -> str:
+    s = str(text)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n\n…（内容过长已截断，原长 {len(s)} 字符）"
+
+STANDARD = {"role", "content", "tool_calls", "tool_call_id"}
+
+
+def format_reference(retrieved, threshold=0.3):
+    """把检索结果格式化为第二条 system 的内容；全部低于阈值则提示笔记无相关内容"""
+    hits = [(name, score, text) for name, score, text in (retrieved or []) if score >= threshold]
+    if not hits:
+        return ("")
+    lines = [f"[{i}] 《{name}》(相关度 {score:.2f})\n{text}"
+             for i, (name, score, text) in enumerate(hits, 1)]
+    lines.append("只依据以上片段回答；片段里没有的信息就直接说笔记里没有，不要编造。")
+    return "【参考资料】\n\n" + "\n\n".join(lines)
+
+
+def build_messages(retrieved=None, threshold=0.3):
+    msgs = [
+        {"role": "system", "content": system_prompt % (st.session_state.nick_name, st.session_state.nature)},
+    ]
+    ref = format_reference(retrieved, threshold)
+    if ref:  # 只有真的有命中才插
+        msgs.append({"role": "system", "content": ref})
+    for m in st.session_state.messages:
+        msgs.append({k: v for k, v in m.items() if k in STANDARD})
+    return msgs
+
+
+def check_and_fix_messages():
+    """
+        检查并修复 messages 的两条结构不变量，返回发现的问题。
+        1. 首条必须是 user
+        2. assistant 的每个 tool_call 必须有配对的 tool 回复；孤立的 tool 消息必须删掉
+        用 if + 日志降级，不用 assert（python -O 会删掉 assert）
+        """
+    problems = []
+    msgs = st.session_state.messages
+    print("  [检查前]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
+
+    idx = 0
+    while idx < len(msgs) and msgs[idx]["role"] != "user":
+        problems.append(f"丢弃开头 {msgs[idx]['role']} 消息")
+        idx += 1
+
+    kept = []
+    for m in msgs[idx:]:
+        if m["role"] == "tool":
+            tid = m.get("tool_call_id")
+            has_call = any(
+                k["role"] == "assistant"
+                and any(tc["id"] == tid for tc in k.get("tool_calls", []))
+                for k in kept
+            )
+            if not has_call:
+                problems.append(f"丢弃孤立 tool 消息（id={tid}）")
+                continue
+        kept.append(m)
+
+    answered = {m.get("tool_call_id") for m in kept if m["role"] == "tool"}
+    repaired = []
+    for m in list(kept):
+        repaired.append(m)
+        if m["role"] == "assistant":
+            for tc in m.get("tool_calls", []):
+                if tc["id"] not in answered:
+                    problems.append(f"补占位 tool 回复（id={tc['id']}）")
+                    repaired.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": "该工具调用已被系统跳过，不要重试。请基于已有信息直接回答用户。",
+                    })
+    kept = repaired
+    msgs[:] = kept
+    print("  [检查后]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
+
+    if problems:
+        print("[结构告警]", problems)
+    return problems
+
+
+
+# 设置页面配置
+st.set_page_config(
+    page_title="AI智能伴侣",
+    page_icon="🤖",
+
+    layout="wide",
+
+    initial_sidebar_state="expanded",
+    menu_items={}
+)
+
+def retrieve(query, candidates=10, top_k=3):
+    """返回 [(文件名, 分数, 正文), ...]，按分数降序，最多 top_k 条"""
+    res = COL.query(query_texts=[query], n_results=candidates)
+    cands = [
+        (doc, meta["file"], dist)
+        for doc, meta, dist in zip(res["documents"][0],
+                                   res["metadatas"][0],
+                                   res["distances"][0])
+    ]
+    cands.sort(key=lambda c: c[2])
+    scores = RERANKER.predict([(query, text) for text, name, dist in cands])
+    order = np.argsort(scores)[::-1]
+    retrieved = [(cands[i][1], float(scores[i]), cands[i][0]) for i in order]
+    return retrieved[:top_k]
+
+
+
 #工具列表
 tools = [
     {
@@ -223,43 +378,6 @@ tools = [
 TOOL_MAP = {"get_time": get_time, "read_note": read_note, "add":add}
 
 
-def estimate_tokens(text:str):
-    return int(len(text)/1.5) + 1
-
-def trim_by_tokens(max_tokens: int= 6000):
-    total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
-    print(f"裁剪前tokens:{total}")
-    if total < max_tokens:
-        return
-    acc, start = 0, len(st.session_state.messages)
-    for i in range(len(st.session_state.messages)-1,-1,-1):
-        acc += estimate_tokens(st.session_state.messages[i].get("content" or ""))
-        if acc > max_tokens:
-            break
-        start = i
-
-    while start < len(st.session_state.messages) and st.session_state.messages[start]["role"] != "user":
-        start += 1
-
-    if start >= len(st.session_state.messages):
-        for j in range(len(st.session_state.messages) - 1, -1, -1):
-            if st.session_state.messages[j]["role"] == "user":
-                start = j
-                break
-        print("预算不足，已放宽一次以保住结构")
-    kept = st.session_state.messages[start:]
-    st.session_state.messages[:] = kept
-    new_total = sum(estimate_tokens(msg.get("content" or "")) for msg in st.session_state.messages)
-    print(f"裁剪后tokens:{new_total}")
-
-#单条截断
-def clip_tool_result(text, limit: int = 2000) -> str:
-    s = str(text)
-    if len(s) <= limit:
-        return s
-    return s[:limit] + f"\n\n…（内容过长已截断，原长 {len(s)} 字符）"
-
-
 # 大标题
 st.title("AI智能伴侣")
 
@@ -278,6 +396,7 @@ system_prompt = """
         6.用符合跟班性格的方式对话
         7.回复的内容，要充分体现性格特征
         8. 需要获取当前时间、读取文件内容、做数字计算时，必须调用对应工具，不要自己猜测或编造结果。
+        9. 当我问的是笔记里的知识点时，可以适当详细，并说明依据哪篇笔记。
     伴侣性格：
         - %s
     你必须遵守上述规则来回复用户
@@ -306,6 +425,8 @@ for message in st.session_state.messages:
     # 2. 内容为空的 assistant（只有 tool_calls 的那种）也不画
     if not message.get("content"):
         continue
+    if message.get("sources"):
+        st.caption("📖 " + " · ".join(message["sources"]))
     st.chat_message(message["role"]).write(message["content"])
 
 
@@ -373,71 +494,14 @@ prompt = st.chat_input("请输入你的问题")
 #     st.session_state.messages.pop(0)
 #     st.session_state.messages.pop(0)
 
-def build_messages():
-    return [
-        {"role": "system", "content": system_prompt % (st.session_state.nick_name, st.session_state.nature)},
-        *st.session_state.messages,
-    ]
-
-
-def check_and_fix_messages():
-    """
-        检查并修复 messages 的两条结构不变量，返回发现的问题。
-        1. 首条必须是 user
-        2. assistant 的每个 tool_call 必须有配对的 tool 回复；孤立的 tool 消息必须删掉
-        用 if + 日志降级，不用 assert（python -O 会删掉 assert）
-        """
-    problems = []
-    msgs = st.session_state.messages
-    print("  [检查前]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
-
-    idx = 0
-    while idx < len(msgs) and msgs[idx]["role"] != "user":
-        problems.append(f"丢弃开头 {msgs[idx]['role']} 消息")
-        idx += 1
-
-    kept = []
-    for m in msgs[idx:]:
-        if m["role"] == "tool":
-            tid = m.get("tool_call_id")
-            has_call = any(
-                k["role"] == "assistant"
-                and any(tc["id"] == tid for tc in k.get("tool_calls", []))
-                for k in kept
-            )
-            if not has_call:
-                problems.append(f"丢弃孤立 tool 消息（id={tid}）")
-                continue
-        kept.append(m)
-
-    answered = {m.get("tool_call_id") for m in kept if m["role"] == "tool"}
-    repaired = []
-    for m in list(kept):
-        repaired.append(m)
-        if m["role"] == "assistant":
-            for tc in m.get("tool_calls", []):
-                if tc["id"] not in answered:
-                    problems.append(f"补占位 tool 回复（id={tc['id']}）")
-                    repaired.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": "该工具调用已被系统跳过，不要重试。请基于已有信息直接回答用户。",
-                    })
-    kept = repaired
-    msgs[:] = kept
-    print("  [检查后]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
-
-    if problems:
-        print("[结构告警]", problems)
-    return problems
-
-
 if prompt:
     print("-------------->调用AI大模型，提示词", prompt)
 
-    #保存用户输入的提示词
+    # 保存用户输入的提示词
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
+    retrieved = retrieve(prompt)
+    print("检索到:", [(f, round(s, 3)) for f, s, _ in retrieved])
 
 
 
@@ -452,9 +516,15 @@ if prompt:
             for i, m in enumerate(st.session_state.messages):
                 print(i, m["role"], "TC" if m.get("tool_calls") else "", str(m.get("content"))[:40])
 
+            msgs = build_messages(retrieved)
+            print("====== 实际发送 ======")
+            for i, m in enumerate(msgs[:3]):
+                print(f"[{i}] {m['role']}: {str(m.get('content'))[:200]}")
+            print("======================")
+            messages = msgs
             stream = client.chat.completions.create(
                 model="deepseek-chat",
-                messages=build_messages(),
+                messages=msgs,
                 tools = tools,
                 stream=True,
                 # reasoning_effort="high",
@@ -491,6 +561,8 @@ if prompt:
                     for s in tool_calls_acc.values()
                 ]
             st.session_state.messages.append(assistant_msg)
+
+            assistant_msg["sources"] = [f"{f} ({s:.2f})" for f, s, _ in retrieved if s >= 0.3]
 
             if not assistant_msg.get("tool_calls"):
                 break
