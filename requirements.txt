@@ -3,4 +3,6 @@ openai
 python-dotenv
 pydantic
 sentence-transformers
-chromadb
+chromadbfastapi==0.162.0
+python-multipart==0.0.32
+uvicorn==0.54.0

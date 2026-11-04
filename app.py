@@ -313,20 +313,6 @@ st.set_page_config(
     menu_items={}
 )
 
-def retrieve(query, candidates=10, top_k=3):
-    """返回 [(文件名, 分数, 正文), ...]，按分数降序，最多 top_k 条"""
-    res = COL.query(query_texts=[query], n_results=candidates)
-    cands = [
-        (doc, meta["file"], dist)
-        for doc, meta, dist in zip(res["documents"][0],
-                                   res["metadatas"][0],
-                                   res["distances"][0])
-    ]
-    cands.sort(key=lambda c: c[2])
-    scores = RERANKER.predict([(query, text) for text, name, dist in cands])
-    order = np.argsort(scores)[::-1]
-    retrieved = [(cands[i][1], float(scores[i]), cands[i][0]) for i in order]
-    return retrieved[:top_k]
 
 
 

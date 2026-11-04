@@ -1,3 +1,4 @@
+# 已废弃，见 app.py 的 retrieve()
 import sys
 from pathlib import Path
 
