@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 import os
@@ -27,7 +27,12 @@ class ChatIn(BaseModel):
 @app.post("/ingest")
 async def ingest(file: UploadFile = File(...)):
     raw = await file.read()
-    text = raw.decode("utf-8")
+    if not file.filename.endswith(".md"):
+        raise HTTPException(status_code=400, detail="只接受 .md 文件")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="文件不是 UTF-8 编码")
     chunks = split_by_head(text)
 
     COL.delete(where={"file": file.filename})
@@ -42,10 +47,13 @@ async def ingest(file: UploadFile = File(...)):
 @app.post("/chat")
 def chat(body: ChatIn):
     session_id = body.session_id
-    if not session_id:
-        session = new_session_dict()
+    if body.session_id is None:
+        session, created = new_session_dict(), True
     else:
-        session = load_session(session_id) or new_session_dict()
+        session = load_session(body.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        created = False
 
     messages = session["messages"]
     messages.append({"role": "user", "content": body.question})
@@ -66,11 +74,19 @@ def chat(body: ChatIn):
     session["messages"] = messages
     save_session(session)
 
+    best: dict[str, float] = {}
+    for f, s, _ in retrieved:
+        if s < SCORE_THRESHOLD:
+            continue
+        if f not in best or s > best[f]:
+            best[f] = round(s, 3)
+        sources = [{"file": f, "score": s} for f, s in best.items()]
+
     return {
         "session_id": session["session_id"],
         "answer": answer,
-        "sources": [{"file": f, "score": round(s, 3)}
-                    for f, s, _ in retrieved if s >= SCORE_THRESHOLD],
+        "sources": sources,
+        "created":created,
     }
 
 
