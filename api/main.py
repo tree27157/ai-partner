@@ -6,11 +6,13 @@ import os
 from api.chunking import split_by_head
 from api.store import (new_session_dict, load_session, save_session,
                        load_sessions, delete_session)
-from api.rag import retrieve, build_messages, COL, SCORE_THRESHOLD
+from api.rag import retrieve, build_messages, COL, SCORE_THRESHOLD, embed
 from api.messages import trim_by_tokens, check_and_fix_messages
 from api.prompt import make_system_prompt
 from pathlib import Path
 from dotenv import load_dotenv
+import psycopg
+PG_DSN = "dbname=aipartner"
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")   # 明确指向项目根
 app = FastAPI(title="AI 伴侣 API")
@@ -23,6 +25,9 @@ class ChatIn(BaseModel):
     question: str
     session_id: str | None = None
 
+def _vec_str(v) -> str:
+    """list[float] → '[0.1,0.2,...]'"""
+    return "[" + ",".join(str(float(x)) for x in v) + "]"
 
 @app.post("/ingest")
 async def ingest(file: UploadFile = File(...)):
@@ -35,11 +40,20 @@ async def ingest(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件不是 UTF-8 编码")
     chunks = split_by_head(text)
 
-    COL.delete(where={"file": file.filename})
+    vecs = embed(chunks)
 
-    ids = [f"{file.filename}::{i}" for i in range(len(chunks))]
-    metadatas = [{"file": file.filename} for _ in chunks]
-    COL.add(documents=chunks, ids=ids, metadatas=metadatas)
+    with psycopg.connect(PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE file = %s", (file.filename,))
+            cur.executemany(
+                "INSERT INTO chunks (file, content, embedding) VALUES (%s, %s, %s::vector)",
+                [(file.filename, c, _vec_str(v)) for c, v in zip(chunks, vecs)],
+            )
+
+        COL.delete(where={"file": file.filename})
+        COL.add(documents=chunks, embeddings=vecs,
+                ids=[f"{file.filename}::{i}" for i in range(len(chunks))],
+                metadatas=[{"file": file.filename} for _ in chunks])
 
     return {"filename": file.filename, "chunks": len(chunks)}
 
@@ -80,7 +94,7 @@ def chat(body: ChatIn):
             continue
         if f not in best or s > best[f]:
             best[f] = round(s, 3)
-        sources = [{"file": f, "score": s} for f, s in best.items()]
+    sources = [{"file": f, "score": s} for f, s in best.items()]
 
     return {
         "session_id": session["session_id"],

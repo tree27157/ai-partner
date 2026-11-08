@@ -19,6 +19,9 @@ SCORE_THRESHOLD = 0.3
 RERANKER = CrossEncoder("BAAI/bge-reranker-base")
 STANDARD = {"role", "content", "tool_calls", "tool_call_id"}
 
+def embed(texts: list[str]) -> list[list[float]]:
+    return _ef(texts)
+
 def format_reference(retrieved, threshold= SCORE_THRESHOLD):
     """把检索结果格式化为第二条 system 的内容；全部低于阈值则提示笔记无相关内容"""
     hits = [(name, score, text) for name, score, text in (retrieved or []) if score >= threshold]
