@@ -4,13 +4,14 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from pathlib import Path
+from api.config import CHROMA_DIR
 
 ROOT = Path(__file__).resolve().parent.parent
 
 _ef = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="BAAI/bge-small-zh-v1.5")
 _client = chromadb.PersistentClient(
-    path=str(ROOT / "chroma_db"),
+    path=CHROMA_DIR,
     settings=Settings(anonymized_telemetry=False))
 COL = _client.get_or_create_collection(
     "notes_head", embedding_function=_ef,

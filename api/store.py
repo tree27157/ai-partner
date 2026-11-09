@@ -5,9 +5,10 @@ import json
 import os
 import uuid
 from pathlib import Path
+from api.config import SESSIONS_DIR
 
 ROOT = Path(__file__).resolve().parent.parent
-SESSIONS = ROOT / "sessions"
+SESSIONS = Path(SESSIONS_DIR)
 
 def save_session(session: dict):
     if not session.get("messages"):

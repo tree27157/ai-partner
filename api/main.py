@@ -9,17 +9,16 @@ from api.store import (new_session_dict, load_session, save_session,
 from api.rag import retrieve, build_messages, COL, SCORE_THRESHOLD, embed
 from api.messages import trim_by_tokens, check_and_fix_messages
 from api.prompt import make_system_prompt
-from pathlib import Path
-from dotenv import load_dotenv
 import psycopg
-PG_DSN = "dbname=aipartner"
+from api.config import DB_URL, BASE_URL, DEEPSEEK_API_KEY
+PG_DSN = DB_URL
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")   # 明确指向项目根
 app = FastAPI(title="AI 伴侣 API")
 
 client = OpenAI(
-    api_key=os.environ.get("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com")
+    api_key=DEEPSEEK_API_KEY,
+    base_url=BASE_URL,
+)
 
 class ChatIn(BaseModel):
     question: str
