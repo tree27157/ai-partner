@@ -1,3 +1,12 @@
+---
+title: AI Partner
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+---
+
 # AI 智能伴侣
 
 基于 DeepSeek API 的多轮对话聊天应用，Streamlit 界面。
