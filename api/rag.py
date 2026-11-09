@@ -4,7 +4,7 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from pathlib import Path
-from api.config import CHROMA_DIR
+from api.config import CHROMA_DIR, ENABLE_RERANK
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -17,7 +17,10 @@ COL = _client.get_or_create_collection(
     "notes_head", embedding_function=_ef,
     metadata={"hnsw:space": "cosine"})
 SCORE_THRESHOLD = 0.3
-RERANKER = CrossEncoder("BAAI/bge-reranker-base")
+if ENABLE_RERANK:
+    RERANKER = CrossEncoder("BAAI/bge-reranker-base")
+else:
+    RERANKER = None
 STANDARD = {"role", "content", "tool_calls", "tool_call_id"}
 
 def embed(texts: list[str]) -> list[list[float]]:
@@ -56,7 +59,14 @@ def retrieve(query, candidates=10, top_k=3):
                                    res["distances"][0])
     ]
     cands.sort(key=lambda c: c[2])
+
+    if RERANKER is None:
+        # 关掉 rerank：余弦距离 → 相似度（1 - d），再截断
+        return [(f, round(1 - d, 3), text) for text, f, d in cands[:top_k]]
+
+
     scores = RERANKER.predict([(query, text) for text, name, dist in cands])
     order = np.argsort(scores)[::-1]
     retrieved = [(cands[i][1], float(scores[i]), cands[i][0]) for i in order]
     return retrieved[:top_k]
+
