@@ -5,19 +5,33 @@ import json
 import os
 import uuid
 from pathlib import Path
-from api.config import SESSIONS_DIR
+from api.config import SESSIONS_DIR, DB_URL
+
+import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS = Path(SESSIONS_DIR)
 
+def _conn():
+    return psycopg.connect(DB_URL)
+
 def save_session(session: dict):
     if not session.get("messages"):
         return
-    SESSIONS.mkdir(parents=True, exist_ok=True)
-    if session.get("session_id"):
-        with open(SESSIONS / f"{session['session_id']}.json", "w", encoding="utf-8") as f:
-            json.dump(session, f, ensure_ascii=False, indent=2)
-
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO sessions
+                  (session_id, created_at, display_name, nick_name, nature, messages)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (session_id) DO UPDATE SET
+                  messages     = EXCLUDED.messages,
+                  display_name = EXCLUDED.display_name
+            """, (
+                session["session_id"], session["created_at"], session["display_name"],
+                session["nick_name"], session["nature"],
+                json.dumps(session["messages"], ensure_ascii=False),
+            ))
 
 
 #加载所有的会话列表信息
@@ -32,25 +46,6 @@ def resolve_created_at(session_id, path, param):
         # 最后兜底：文件修改时间
         return datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
 
-def load_sessions() -> list[dict]:
-    if not SESSIONS.exists():
-        return []
-    session_list = []
-    for p in SESSIONS.glob("*.json"):
-        session_id = p.stem
-        display_name = None
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            display_name = data.get("display_name")
-            created_at = resolve_created_at(session_id, p, data)
-        except Exception as e:
-            print(f"[load_sessions] 读取 {p.name} 失败：{type(e).__name__}: {e}")
-            created_at = resolve_created_at(session_id, p, {})
-        session_list.append({"session_id": session_id,
-                             "display_name": display_name,
-                             "created_at": created_at})
-    session_list.sort(key=lambda s: s["created_at"], reverse=True)
-    return session_list
 
 def generate_session_name():
     return str(uuid.uuid4())
@@ -78,17 +73,34 @@ def format_session_label(display_name, created_at, session_id):
         return raw
 
 def load_session(session_id):
-    p = SESSIONS / f"{session_id}.json"
-    if not p.exists():
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT session_id, created_at, display_name,
+                                  nick_name, nature, messages
+                           FROM sessions WHERE session_id = %s""", (session_id,))
+            row = cur.fetchone()
+    if row is None:
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    sid, created_at, display_name, nick_name, nature, messages = row
+    return {"session_id": sid, "created_at": created_at.isoformat(),
+            "display_name": display_name, "nick_name": nick_name,
+            "nature": nature, "messages": messages}
+
+def load_sessions() -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT session_id, display_name, created_at
+                           FROM sessions ORDER BY created_at DESC""")
+            rows = cur.fetchall()
+    return [{"session_id": r[0], "display_name": r[1],
+             "created_at": r[2].isoformat()} for r in rows]
 
 def delete_session(session_id):
-    p = SESSIONS / f"{session_id}.json"
-    if p.exists():
-        p.unlink()
-        return True
-    return False
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
+            deleted = cur.rowcount > 0
+    return deleted
 
 
 

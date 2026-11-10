@@ -16,7 +16,7 @@ _client = chromadb.PersistentClient(
 COL = _client.get_or_create_collection(
     "notes_head", embedding_function=_ef,
     metadata={"hnsw:space": "cosine"})
-SCORE_THRESHOLD = 0.3
+SCORE_THRESHOLD = 0.45
 if ENABLE_RERANK:
     RERANKER = CrossEncoder("BAAI/bge-reranker-base")
 else:

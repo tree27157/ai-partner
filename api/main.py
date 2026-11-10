@@ -73,7 +73,27 @@ def chat(body: ChatIn):
     messages = trim_by_tokens(messages)
     messages = check_and_fix_messages(messages)
 
-    retrieved = retrieve(body.question)
+    # 取最近一条 user 消息（不含当前这条）
+    prev = None
+    for m in reversed(messages[:-1]):
+        if m["role"] == "user":
+            prev = m["content"]
+            break
+
+    query = f"{prev} {body.question}" if prev else body.question
+    retrieved = retrieve(query)
+    hits = [r for r in retrieved if r[1] >= SCORE_THRESHOLD]
+    if not hits:
+        answer = "笔记里没有相关内容，我不知道。"
+        messages.append({"role": "assistant", "content": answer})
+        session["messages"] = messages
+        save_session(session)
+        return {
+            "session_id": session["session_id"],
+            "answer": answer,
+            "sources": [],
+            "created": created,
+        }
     sys_p = make_system_prompt(session["nick_name"], session["nature"])
     msgs = build_messages(messages, sys_p, retrieved)
 
