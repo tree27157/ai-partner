@@ -3,8 +3,6 @@ title: AI Partner
 emoji: 🤖
 colorFrom: blue
 colorTo: green
-sdk: docker
-app_port: 7860
 ---
 
 # AI 伴侣 · 笔记问答服务
@@ -14,9 +12,9 @@ app_port: 7860
 
 ## 在线演示
 
-[https://knife-till-suffered-licensed.trycloudflare.com/docs](https://knife-till-suffered-licensed.trycloudflare.com/docs)
-
-> ⚠️ 通过 Cloudflare Tunnel 暴露本机服务：电脑关机或休眠即失效，URL 每次重启会变。
+- Swagger 文档：<http://120.55.193.78:8000/docs>
+- 部署方式：阿里云 ECS（Debian 13 / 2核2G），systemd 常驻 + 开机自启
+- 无 HTTPS：当前用 `IP:8000` 直连，下一步计划加 Caddy 反向代理 + 域名
 
 ## 功能
 

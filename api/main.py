@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import os
@@ -28,6 +29,9 @@ def _vec_str(v) -> str:
     """list[float] → '[0.1,0.2,...]'"""
     return "[" + ",".join(str(float(x)) for x in v) + "]"
 
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
 @app.post("/ingest")
 async def ingest(file: UploadFile = File(...)):
     raw = await file.read()
