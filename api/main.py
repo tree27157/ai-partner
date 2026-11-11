@@ -130,3 +130,26 @@ def chat(body: ChatIn):
 @app.get("/sessions")
 def list_sessions():
     return load_sessions()
+
+@app.delete("/documents/{filename}", status_code=204)
+def delete_document(filename:str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400,detail="非法文件名")
+
+    in_chroma = bool(COL.get(where={"file":filename})["ids"])
+
+    with psycopg.connect(DB_URL) as corn:
+        with corn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM chunks WHERE file = %s", (filename,))
+            in_pg = cur.fetchone()[0] > 0
+        if not in_chroma and not in_pg:
+            raise HTTPException(status_code=404, detail="文档不存在")
+
+    COL.delete(where={"file": filename})
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE file = %s", (filename,))
+
+    return None
+
