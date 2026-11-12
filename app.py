@@ -13,6 +13,7 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from sentence_transformers import CrossEncoder
 from streamlit import session_state
+from api.rag import retrieve, build_messages, SCORE_THRESHOLD
 
 load_dotenv()
 MAX_STEPS = 5
@@ -25,7 +26,6 @@ def load_reranker():
     print("----> 真正加载 reranker")
     return CrossEncoder("BAAI/bge-reranker-base")
 
-RERANKER = load_reranker()
 
 @st.cache_resource
 def load_store():
@@ -36,7 +36,6 @@ def load_store():
         model_name="BAAI/bge-small-zh-v1.5")
     return client.get_collection("notes_head", embedding_function=ef)
 
-COL = load_store()
 
 #工具函数
 def get_time():
@@ -225,28 +224,6 @@ def clip_tool_result(text, limit: int = 2000) -> str:
 
 STANDARD = {"role", "content", "tool_calls", "tool_call_id"}
 
-
-def format_reference(retrieved, threshold=0.3):
-    """把检索结果格式化为第二条 system 的内容；全部低于阈值则提示笔记无相关内容"""
-    hits = [(name, score, text) for name, score, text in (retrieved or []) if score >= threshold]
-    if not hits:
-        return ("")
-    lines = [f"[{i}] 《{name}》(相关度 {score:.2f})\n{text}"
-             for i, (name, score, text) in enumerate(hits, 1)]
-    lines.append("只依据以上片段回答；片段里没有的信息就直接说笔记里没有，不要编造。")
-    return "【参考资料】\n\n" + "\n\n".join(lines)
-
-
-def build_messages(retrieved=None, threshold=0.3):
-    msgs = [
-        {"role": "system", "content": system_prompt % (st.session_state.nick_name, st.session_state.nature)},
-    ]
-    ref = format_reference(retrieved, threshold)
-    if ref:  # 只有真的有命中才插
-        msgs.append({"role": "system", "content": ref})
-    for m in st.session_state.messages:
-        msgs.append({k: v for k, v in m.items() if k in STANDARD})
-    return msgs
 
 
 def check_and_fix_messages():
@@ -487,6 +464,7 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
     retrieved = retrieve(prompt)
+    sys_p = system_prompt % (st.session_state.nick_name, st.session_state.nature)
     print("检索到:", [(f, round(s, 3)) for f, s, _ in retrieved])
 
 
@@ -502,7 +480,7 @@ if prompt:
             for i, m in enumerate(st.session_state.messages):
                 print(i, m["role"], "TC" if m.get("tool_calls") else "", str(m.get("content"))[:40])
 
-            msgs = build_messages(retrieved)
+            msgs = build_messages(st.session_state.messages, sys_p, retrieved)
             print("====== 实际发送 ======")
             for i, m in enumerate(msgs[:3]):
                 print(f"[{i}] {m['role']}: {str(m.get('content'))[:200]}")
@@ -548,7 +526,7 @@ if prompt:
                 ]
             st.session_state.messages.append(assistant_msg)
 
-            assistant_msg["sources"] = [f"{f} ({s:.2f})" for f, s, _ in retrieved if s >= 0.3]
+            assistant_msg["sources"] = [f"{f} ({s:.2f})" for f, s, _ in retrieved if s >= SCORE_THRESHOLD]
 
             if not assistant_msg.get("tool_calls"):
                 break

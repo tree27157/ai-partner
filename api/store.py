@@ -2,15 +2,11 @@
 #   session_id, created_at, display_name, nick_name, nature, messages
 from datetime import datetime
 import json
-import os
 import uuid
-from pathlib import Path
-from api.config import SESSIONS_DIR, DB_URL
+from api.config import DB_URL
 
 import psycopg
 
-ROOT = Path(__file__).resolve().parent.parent
-SESSIONS = Path(SESSIONS_DIR)
 
 def _conn():
     return psycopg.connect(DB_URL)
@@ -32,19 +28,6 @@ def save_session(session: dict):
                 session["nick_name"], session["nature"],
                 json.dumps(session["messages"], ensure_ascii=False),
             ))
-
-
-#加载所有的会话列表信息
-def resolve_created_at(session_id, path, param):
-    created_at = param.get("created_at")
-    if created_at:
-        return created_at
-    try:
-        # 旧文件名就是 "%Y-%m-%d %H:%M:%S" 格式的时间戳
-        return datetime.strptime(session_id, "%Y-%m-%d %H:%M:%S").isoformat()
-    except ValueError:
-        # 最后兜底：文件修改时间
-        return datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
 
 
 def generate_session_name():
