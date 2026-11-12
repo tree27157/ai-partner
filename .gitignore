@@ -6,3 +6,4 @@ sessions/
 .DS_Store
 *.pyc
 .env.brokenchroma_db/
+chroma_db/
