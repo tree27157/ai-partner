@@ -12,6 +12,8 @@ from api.messages import trim_by_tokens, check_and_fix_messages
 from api.prompt import make_system_prompt
 import psycopg
 from api.config import DB_URL, BASE_URL, DEEPSEEK_API_KEY
+from api.tools import TOOLS, run_tool
+
 PG_DSN = DB_URL
 
 app = FastAPI(title="AI 伴侣 API")
@@ -20,6 +22,8 @@ client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=BASE_URL,
 )
+
+MAX_STEPS = 5
 
 class ChatIn(BaseModel):
     question: str
@@ -99,13 +103,42 @@ def chat(body: ChatIn):
             "created": created,
         }
     sys_p = make_system_prompt(session["nick_name"], session["nature"])
-    msgs = build_messages(messages, sys_p, retrieved)
 
-    resp = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=msgs,
-    )
-    answer = resp.choices[0].message.content
+    answer = None
+    for step in range(1, MAX_STEPS + 1):
+        msgs = build_messages(messages, sys_p, retrieved)
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=msgs,
+            tools=TOOLS,
+        )
+        msg = resp.choices[0].message
+        reason = resp.choices[0].finish_reason
+
+        if reason != "tool_calls":  # stop / length
+            answer = msg.content or ""
+            break
+
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [c.model_dump() for c in msg.tool_calls],
+        })
+
+        for call in msg.tool_calls:
+            result = run_tool(call)  # ← 你写
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": result,
+            })
+
+        session["messages"] = messages
+        save_session(session)
+
+    if not answer:
+        answer = "这个问题我试了几步没搞定，换个问法？"
+
 
     messages.append({"role": "assistant", "content": answer})
     session["messages"] = messages
