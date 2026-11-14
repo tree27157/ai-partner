@@ -3,6 +3,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import os
+import json
 
 from api.chunking import split_by_head
 from api.store import (new_session_dict, load_session, save_session,
@@ -33,6 +34,28 @@ def _vec_str(v) -> str:
     """list[float] → '[0.1,0.2,...]'"""
     return "[" + ",".join(str(float(x)) for x in v) + "]"
 
+def _digest(raw: str) -> str:
+    """把 tool 返回的 JSON 压成一句人话，失败或非 JSON 就截断"""
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw[:60].replace("\n", " ")
+
+    if not isinstance(d, dict):
+        return raw[:60]
+
+    if d.get("ok") is False:
+        return f"失败：{d.get('error') or d.get('code')}"
+
+    if "content" in d:                              # read_note
+        body = str(d["content"]).replace("\n", " ").strip()
+        return f"《{d.get('filename', '')}》{body[:60]}"
+
+    if "count" in d:                                # query_chunks
+        files = {r.get("file") for r in d.get("rows", [])}
+        return f"查到 {d['count']} 块（涉及 {len(files)} 篇）"
+
+    return raw[:60]
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/docs")
@@ -139,9 +162,9 @@ def chat(body: ChatIn):
 
     if answer is None:
         done = [
-            m["content"][:200]
+            _digest(m["content"])
             for m in messages
-            if m.get("role") == "tool"
+            if m.get("role") == "tool" and m.get("content")
         ]
         answer = "这个任务我试了 %d 步还没搞定。" % MAX_STEPS
         if done:
