@@ -92,16 +92,7 @@ def chat(body: ChatIn):
     retrieved = retrieve(query)
     hits = [r for r in retrieved if r[1] >= SCORE_THRESHOLD]
     if not hits:
-        answer = "笔记里没有相关内容，我不知道。"
-        messages.append({"role": "assistant", "content": answer})
-        session["messages"] = messages
-        save_session(session)
-        return {
-            "session_id": session["session_id"],
-            "answer": answer,
-            "sources": [],
-            "created": created,
-        }
+        retrieved = []
     sys_p = make_system_prompt(session["nick_name"], session["nature"])
 
     answer = None
@@ -115,30 +106,47 @@ def chat(body: ChatIn):
         msg = resp.choices[0].message
         reason = resp.choices[0].finish_reason
 
-        if reason != "tool_calls":  # stop / length
+        if reason == "stop":
             answer = msg.content or ""
             break
 
-        messages.append({
-            "role": "assistant",
-            "content": msg.content,
-            "tool_calls": [c.model_dump() for c in msg.tool_calls],
-        })
+        elif reason == "length":
+            # 被 max_tokens 截断：内容不完整
+            answer = (msg.content or "") + "\n\n（回答被截断，可以让我接着说）"
+            break
 
-        for call in msg.tool_calls:
-            result = run_tool(call)  # ← 你写
+        elif reason == "tool_calls":
             messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": result,
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [c.model_dump() for c in msg.tool_calls],
             })
 
-        session["messages"] = messages
-        save_session(session)
+            for call in msg.tool_calls:
+                result = run_tool(call)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
+                })
 
-    if not answer:
-        answer = "这个问题我试了几步没搞定，换个问法？"
+            session["messages"] = messages
+            save_session(session)
 
+        else:
+            answer = f"模型返回了异常的结束原因：{reason}"
+            break
+
+    if answer is None:
+        done = [
+            m["content"][:200]
+            for m in messages
+            if m.get("role") == "tool"
+        ]
+        answer = "这个任务我试了 %d 步还没搞定。" % MAX_STEPS
+        if done:
+            answer += "\n\n已经查到的有：\n" + "\n".join(f"- {d}" for d in done[-3:])
+        answer += "\n\n要不要把问题拆小一点？"
 
     messages.append({"role": "assistant", "content": answer})
     session["messages"] = messages

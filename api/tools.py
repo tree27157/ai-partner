@@ -2,9 +2,13 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from api.config import DB_URL
+import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTES = ROOT / "notes"
+
+MAX_LIMIT = 20
 
 TOOLS = [
     {
@@ -26,6 +30,21 @@ TOOLS = [
                     "filename": {"type": "string", "description": "文件名，如 14_IP协议、子网划分与CIDR.md"}
                 },
                 "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_chunks",
+            "description": "按文件名或内容关键词查询数据库里已切分好的块，返回每个块的预览。适合回答‘某篇切成了几块’‘哪些块提到某词’这类精确条件查询。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "文件名，如 14_IP协议、子网划分与CIDR.md"},
+                    "content_like": {"type": "string", "description": "内容包含的关键词，如 饥饿"},
+                    "limit":{"type": "integer", "description": "返回条数，默认 10，上限 20"},
+                },
             },
         },
     },
@@ -59,6 +78,42 @@ def read_note(filename):
     return json.dumps({"ok": True, "filename": filename, "content": content},
                       ensure_ascii=False)
 
+def query_chunks(file: str | None = None, content_like: str | None = None, limit: int = 10):
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return _err("BAD_TYPE", "limit 必须是正整数", got=type(limit).__name__)
+    limit = min(limit, MAX_LIMIT)
+
+    file = file.strip() if isinstance(file, str) else None
+    content_like = content_like.strip() if isinstance(content_like, str) else None
+
+    if not file and not content_like:
+        return _err("BAD_ARGS", "file 和 content_like 至少给一个")
+
+    where, params = [], []
+    if file is not None:
+        where.append("file = %s")
+        params.append(file)
+    if content_like is not None:
+        esc = content_like.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where.append("content LIKE %s ESCAPE '\\'")
+        params.append(f"%{esc}%")
+
+    sql = f"SELECT file, left(content, 120) FROM chunks WHERE {' AND '.join(where)} LIMIT %s"
+    params.append(limit)
+
+    try:
+        with psycopg.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+    except Exception as e:
+        return _err("DB_ERROR", f"{type(e).__name__}: {e}")
+
+    return json.dumps({"ok": True, "count": len(rows),
+                       "rows": [{"file": r[0], "preview": r[1]} for r in rows]},
+                      ensure_ascii=False)
+
+
 def run_tool(call) -> str:
     name = call.function.name
     raw = call.function.arguments or "{}"
@@ -80,5 +135,4 @@ def run_tool(call) -> str:
         return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
                           ensure_ascii=False)
 
-
-TOOL_MAP = {"get_time": get_time, "read_note": read_note}
+TOOL_MAP = {"get_time": get_time, "read_note": read_note, "query_chunks": query_chunks}
