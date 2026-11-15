@@ -45,7 +45,6 @@ def check_and_fix_messages(messages):
         """
     problems = []
     msgs = messages
-    print("  [检查前]", [(m["role"], bool(m.get("tool_calls"))) for m in msgs])
 
     idx = 0
     while idx < len(msgs) and msgs[idx]["role"] != "user":
@@ -80,7 +79,6 @@ def check_and_fix_messages(messages):
                         "content": "该工具调用已被系统跳过，不要重试。请基于已有信息直接回答用户。",
                     })
     kept = repaired
-    print("  [检查后]", [(m["role"], bool(m.get("tool_calls"))) for m in kept])
 
     if problems:
         print("[结构告警]", problems)
