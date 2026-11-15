@@ -1,3 +1,4 @@
+import time, uuid, logging
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -14,6 +15,10 @@ from api.prompt import make_system_prompt
 import psycopg
 from api.config import DB_URL, BASE_URL, DEEPSEEK_API_KEY
 from api.tools import TOOLS, run_tool
+
+logger = logging.getLogger("aipartner")
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 
 PG_DSN = DB_URL
 
@@ -90,106 +95,135 @@ async def ingest(file: UploadFile = File(...)):
 
 @app.post("/chat")
 def chat(body: ChatIn):
-    session_id = body.session_id
-    if body.session_id is None:
-        session, created = new_session_dict(), True
-    else:
-        session = load_session(body.session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="会话不存在")
-        created = False
+    rid = uuid.uuid4().hex[:8]
+    t0 = time.perf_counter()
+    used_tools: list[str] = []
+    finish = "unknown"
+    sid = body.session_id or "-"
+    step = 0
+    retrieved = []
+    try:
+        if body.session_id is None:
+            session, created = new_session_dict(), True
+            sid = session["session_id"]
+        else:
+            session = load_session(body.session_id)
+            if session is None:
+                finish = "session_not_found"
+                raise HTTPException(status_code=404, detail="会话不存在")
+            created = False
 
-    messages = session["messages"]
-    messages.append({"role": "user", "content": body.question})
-    messages = trim_by_tokens(messages)
-    messages = check_and_fix_messages(messages)
+        messages = session["messages"]
+        messages.append({"role": "user", "content": body.question})
+        messages = trim_by_tokens(messages)
+        messages = check_and_fix_messages(messages)
 
-    # 取最近一条 user 消息（不含当前这条）
-    prev = None
-    for m in reversed(messages[:-1]):
-        if m["role"] == "user":
-            prev = m["content"]
-            break
+        # 取最近一条 user 消息（不含当前这条）
+        prev = None
+        for m in reversed(messages[:-1]):
+            if m["role"] == "user":
+                prev = m["content"]
+                break
 
-    query = f"{prev} {body.question}" if prev else body.question
-    retrieved = retrieve(query)
-    hits = [r for r in retrieved if r[1] >= SCORE_THRESHOLD]
-    if not hits:
-        retrieved = []
-    sys_p = make_system_prompt(session["nick_name"], session["nature"])
+        query = f"{prev} {body.question}" if prev else body.question
+        retrieved = retrieve(query)
+        hits = [r for r in retrieved if r[1] >= SCORE_THRESHOLD]
+        if not hits:
+            retrieved = []
+        sys_p = make_system_prompt(session["nick_name"], session["nature"])
 
-    answer = None
-    for step in range(1, MAX_STEPS + 1):
-        msgs = build_messages(messages, sys_p, retrieved)
-        resp = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=msgs,
-            tools=TOOLS,
-        )
-        msg = resp.choices[0].message
-        reason = resp.choices[0].finish_reason
+        answer = None
+        for step in range(1, MAX_STEPS + 1):
+            msgs = build_messages(messages, sys_p, retrieved)
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=msgs,
+                tools=TOOLS,
+            )
+            msg = resp.choices[0].message
+            reason = resp.choices[0].finish_reason
+            finish = reason
 
-        if reason == "stop":
-            answer = msg.content or ""
-            break
+            if reason == "stop":
+                answer = msg.content or ""
+                break
 
-        elif reason == "length":
-            # 被 max_tokens 截断：内容不完整
-            answer = (msg.content or "") + "\n\n（回答被截断，可以让我接着说）"
-            break
+            elif reason == "length":
+                # 被 max_tokens 截断：内容不完整
+                answer = (msg.content or "") + "\n\n（回答被截断，可以让我接着说）"
+                break
 
-        elif reason == "tool_calls":
-            messages.append({
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [c.model_dump() for c in msg.tool_calls],
-            })
-
-            for call in msg.tool_calls:
-                result = run_tool(call)
+            elif reason == "tool_calls":
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result,
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [c.model_dump() for c in msg.tool_calls],
                 })
 
-            session["messages"] = messages
-            save_session(session)
+                for call in msg.tool_calls:
+                    used_tools.append(call.function.name)
+                    result = run_tool(call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": result,
+                    })
 
-        else:
-            answer = f"模型返回了异常的结束原因：{reason}"
-            break
+                session["messages"] = messages
+                save_session(session)
 
-    if answer is None:
-        done = [
-            _digest(m["content"])
-            for m in messages
-            if m.get("role") == "tool" and m.get("content")
-        ]
-        answer = "这个任务我试了 %d 步还没搞定。" % MAX_STEPS
-        if done:
-            answer += "\n\n已经查到的有：\n" + "\n".join(f"- {d}" for d in done[-3:])
-        answer += "\n\n要不要把问题拆小一点？"
+            else:
+                answer = f"模型返回了异常的结束原因：{reason}"
+                break
 
-    messages.append({"role": "assistant", "content": answer})
-    session["messages"] = messages
-    save_session(session)
+        if answer is None:
+            done = [
+                _digest(m["content"])
+                for m in messages
+                if m.get("role") == "tool" and m.get("content")
+            ]
+            answer = "这个任务我试了 %d 步还没搞定。" % MAX_STEPS
+            if done:
+                answer += "\n\n已经查到的有：\n" + "\n".join(f"- {d}" for d in done[-3:])
+            answer += "\n\n要不要把问题拆小一点？"
+            finish = "max_steps"
 
-    best: dict[str, float] = {}
-    for f, s, _ in retrieved:
-        if s < SCORE_THRESHOLD:
-            continue
-        if f not in best or s > best[f]:
-            best[f] = round(s, 3)
-    sources = [{"file": f, "score": s} for f, s in best.items()]
+        messages.append({"role": "assistant", "content": answer})
+        session["messages"] = messages
+        save_session(session)
 
-    return {
-        "session_id": session["session_id"],
-        "answer": answer,
-        "sources": sources,
-        "created":created,
-    }
+        best: dict[str, float] = {}
+        for f, s, _ in retrieved:
+            if s < SCORE_THRESHOLD:
+                continue
+            if f not in best or s > best[f]:
+                best[f] = round(s, 3)
+        sources = [{"file": f, "score": s} for f, s in best.items()]
 
+        return {
+            "session_id": session["session_id"],
+            "answer": answer,
+            "sources": sources,
+            "created": created,
+        }
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("chat failed")
+        finish = "error"
+        raise HTTPException(status_code=500, detail="服务器错误") from e
+
+    finally:
+        print(json.dumps({
+            "request_id": rid,
+            "session_id": sid,
+            "latency_ms": int((time.perf_counter() - t0) * 1000),
+            "steps": step,
+            "tools": used_tools,
+            "hits": len(retrieved),  # ← 新增
+            "finish_reason": finish,
+        }, ensure_ascii=False), flush=True)
 
 @app.get("/sessions")
 def list_sessions():

@@ -14,6 +14,7 @@ from chromadb.utils import embedding_functions
 from sentence_transformers import CrossEncoder
 from streamlit import session_state
 from api.rag import retrieve, build_messages, SCORE_THRESHOLD
+from api.tools import get_time, read_note, add, TOOL_MAP
 
 load_dotenv()
 MAX_STEPS = 5
@@ -35,29 +36,6 @@ def load_store():
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="BAAI/bge-small-zh-v1.5")
     return client.get_collection("notes_head", embedding_function=ef)
-
-
-#工具函数
-def get_time():
-    now = datetime.now()
-    s = now.strftime("%Y-%m-%d %H:%M:%S")
-    return s
-
-def add(a, b):
-    return a + b
-
-def read_note(filename):
-    base = (Path(__file__).parent / "notes").resolve()
-    target = (base / filename).resolve()
-    if not target.is_relative_to(base):
-        return "错误：只能读取 notes/ 目录下的文件"
-    if not target.exists():
-        return f"错误：文件 {filename} 不存在"
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError as e:
-        return f"错误：读取文件失败，{e}"
 
 
 # 保存会话信息函数
@@ -338,8 +316,6 @@ tools = [
 }
 ]
 
-TOOL_MAP = {"get_time": get_time, "read_note": read_note, "add":add}
-
 
 # 大标题
 st.title("AI智能伴侣")
@@ -472,7 +448,7 @@ if prompt:
     try:
         for step in range(1, MAX_STEPS + 1):
             trim_by_tokens()
-            problems = check_and_fix_messages()  
+            problems = check_and_fix_messages()
             if problems:
                 st.warning(f"对话结构已自动修复：{problems[0]}")
 

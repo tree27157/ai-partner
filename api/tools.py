@@ -135,4 +135,11 @@ def run_tool(call) -> str:
         return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
                           ensure_ascii=False)
 
-TOOL_MAP = {"get_time": get_time, "read_note": read_note, "query_chunks": query_chunks}
+def add(a, b):
+    if isinstance(a, bool) or isinstance(b, bool) \
+       or not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        return _err("BAD_TYPE", "a 和 b 必须是数字",
+                    got=[type(a).__name__, type(b).__name__])
+    return json.dumps({"ok": True, "a": a, "b": b, "result": a + b}, ensure_ascii=False)
+
+TOOL_MAP = {"get_time": get_time, "read_note": read_note, "query_chunks": query_chunks, "add": add}
