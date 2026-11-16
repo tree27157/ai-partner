@@ -1,5 +1,13 @@
-.venv
-.git
-__pycache__
+.venv/
+chroma_db/
+sessions/
+.env
+.env.broken
+.git/
 *.pyc
-.pytest_cache
+.idea/
+.DS_Store
+reports/
+labs/*.md
+**/__pycache__/
+*.log

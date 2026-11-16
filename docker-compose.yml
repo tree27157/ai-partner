@@ -1,0 +1,37 @@
+services:
+  db:
+    image: docker.1ms.run/pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aipartner
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aipartner"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "5433:5432"
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "dbname=aipartner user=postgres password=postgres host=db port=5432"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      CHROMA_DIR: /app/chroma_db
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - chromadata:/app/chroma_db
+    ports:
+      - "8010:8000"
+
+volumes:
+  pgdata:
+  chromadata:
