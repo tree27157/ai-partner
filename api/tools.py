@@ -115,8 +115,12 @@ def query_chunks(file: str | None = None, content_like: str | None = None, limit
 
 
 def run_tool(call) -> str:
-    name = call.function.name
-    raw = call.function.arguments or "{}"
+    if isinstance(call, dict):
+        name = call["function"]["name"]
+        raw = call["function"].get("arguments") or "{}"
+    else:
+        name = call.function.name
+        raw = call.function.arguments or "{}"
 
     try:
         args = json.loads(raw)

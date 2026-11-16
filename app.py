@@ -14,7 +14,7 @@ from chromadb.utils import embedding_functions
 from sentence_transformers import CrossEncoder
 from streamlit import session_state
 from api.rag import retrieve, build_messages, SCORE_THRESHOLD
-from api.tools import get_time, read_note, add, TOOL_MAP
+from api.tools import get_time, read_note, add, TOOL_MAP, run_tool
 
 load_dotenv()
 MAX_STEPS = 5
@@ -508,15 +508,7 @@ if prompt:
                 break
 
             for call in assistant_msg.get("tool_calls", []):
-                args = json.loads(call["function"]["arguments"])
-                fn = TOOL_MAP.get(call["function"]["name"])
-                if fn is None:
-                    result = f"错误：没有名为 {call['function']['name']} 的工具"
-                else:
-                    try:
-                        result = fn(**args)
-                    except Exception as e:
-                        result = f"工具执行失败：{type(e).__name__}: {e}"
+                result = run_tool(call)
 
                 st.caption(f"🔧 {call['function']['name']} → {str(result)[:40]}")
 
