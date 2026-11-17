@@ -88,6 +88,51 @@ CREATE TABLE sessions (
 
 打开 <http://127.0.0.1:8000/docs>
 
+## 用 Docker 起（推荐）
+
+前置：Docker Desktop（含 `docker compose`）。
+
+```bash
+# 1. 准备配置
+cp .env.example .env
+# 编辑 .env，填入 DEEPSEEK_API_KEY
+
+# 2. 构建并启动（首次会装 torch + 下载 bge-small，5~15 分钟）
+docker compose up -d --build
+
+# 3. 初始化向量库（只需一次，数据落在 chromadata 卷）
+docker compose exec app python labs/build_chunks.py
+
+# 4. 访问
+open http://localhost:8010/docs
+
+# 5. 停止（数据保留在卷里；加 -v 才会连数据一起删）
+docker compose down
+```
+
+**两个数据卷**：`pgdata` 存会话与 chunks，`chromadata` 存向量索引。
+不挂卷的话，`docker compose down` 一执行，数据全丢。
+
+### 国内网络注意事项
+
+拉镜像可能失败（`unexpected EOF` / 长时间无进展），可在 `docker-compose.yml` 里
+给镜像名加反代前缀：
+
+```text
+image: docker.1ms.run/pgvector/pgvector:pg17
+image: docker.1ms.run/library/python:3.13-slim   # 官方镜像要带 /library/
+```
+
+构建 Electron 相关产物时设置 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`。
+
+### 两个已踩过的坑
+
+- **`/docker-entrypoint-initdb.d/init.sql` 只在数据目录为空时执行一次**。
+  改了建表语句不生效 → `docker compose down -v` 重建，或手动
+  `docker compose exec -T db psql -U postgres -d aipartner -f /docker-entrypoint-initdb.d/init.sql`。
+- **向量库重建后要重启 app**：`build_chunks.py` 会删除并重建 collection，
+  而 app 在模块加载时缓存的集合句柄会失效（报 `Collection ... does not exist`）。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -129,6 +174,10 @@ CREATE TABLE sessions (
 - rerank 在 20 题集上为负收益：cross-encoder 对口语化转述的鲁棒性不如预期，
   且会把正确答案从前 3 挤出。5 题小样本时它看起来有效（gap 0.007→0.112），
   扩到 20 题后翻盘——**小样本评测会给出虚假信心**
+
+**embedding 选型**：对比本地 torch、云端 embedding API、ONNX-int8 三条路径，
+以本评测集为唯一标准，top1 分别为 17/16/14，故保留本地模型。
+详见 [`labs/embed_ab_results.md`](labs/embed_ab_results.md)。
 
 ## 已知限制
 
