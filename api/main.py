@@ -13,8 +13,9 @@ from api.rag import retrieve, build_messages, COL, SCORE_THRESHOLD, embed
 from api.messages import trim_by_tokens, check_and_fix_messages
 from api.prompt import make_system_prompt
 import psycopg
-from api.config import DB_URL, BASE_URL, DEEPSEEK_API_KEY
 from api.tools import TOOLS, run_tool
+from api.config import DB_URL
+from api.llm import client, create_with_retry, UpstreamTimeout
 
 logger = logging.getLogger("aipartner")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -24,10 +25,6 @@ PG_DSN = DB_URL
 
 app = FastAPI(title="AI 伴侣 API")
 
-client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url=BASE_URL,
-)
 
 MAX_STEPS = 5
 
@@ -133,13 +130,19 @@ def chat(body: ChatIn):
         sys_p = make_system_prompt(session["nick_name"], session["nature"])
 
         answer = None
+        deadline = time.monotonic() + 60
         for step in range(1, MAX_STEPS + 1):
+            if time.monotonic() > deadline:
+                answer = "任务太久没完成，先给你已有的结果"
+                break
             msgs = build_messages(messages, sys_p, retrieved)
-            resp = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=msgs,
-                tools=TOOLS,
-            )
+            try:
+                resp = create_with_retry(msgs, deadline=deadline, tools=TOOLS, request_id=rid)
+            except UpstreamTimeout as e:
+                finish = "upstream_timeout"
+                logger.warning(json.dumps({"request_id": rid, "event": "upstream_timeout"}, ensure_ascii=False))
+                raise HTTPException(status_code=504, detail="上游模型响应超时，请稍后重试") from e
+
             msg = resp.choices[0].message
             reason = resp.choices[0].finish_reason
             finish = reason

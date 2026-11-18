@@ -14,3 +14,5 @@ BASE_URL      = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 
 ENABLE_RERANK = os.environ.get("ENABLE_RERANK", "0") == "1"
+
+MODEL = "deepseek-chat"
