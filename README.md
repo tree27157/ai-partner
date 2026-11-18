@@ -45,6 +45,25 @@ DeepSeek 生成回答并标注来源文件名；检索不到相关内容时明�
 | 存储 | Postgres 17 | `chunks` 存分块，`sessions` 存会话（JSONB） |
 | 生成 | DeepSeek API | `deepseek-chat` |
 
+## 这个项目是怎么写出来的
+
+本项目**大部分代码由 AI 编程工具生成（我估计 80% 以上）**，我的工作是：拆任务、给上下文、验证输出、定位 AI 生成的 bug。
+
+完整的方法与复盘见 [`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md)，其中有：
+
+- **三次 AI 方案被实测数据否掉**：rerank（20 题上 recall@3 反降）、云端 embedding（17/20 → 16/20）、ONNX 量化（17/20 → 14/20）
+- **三次事故复盘**：SDK 默认 `max_retries=2` 与外层重试叠加、最后一次重试失败后仍白等 9.47s、打点日志本身抛异常把 504 变成 500
+
+日常做法就三条：
+
+1. **贴完整文件和完整输出，不裁剪** —— 我不知道哪一行重要，裁剪等于替自己做了判断
+2. **每次改完先确认能加载，再跑真实请求**
+   ```bash
+   python -c "import api.main; print('ok')"
+   curl -i -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"question":"现在几点"}'
+   ```
+3. **凡是"更快 / 更准 / 更省"的主张，都在同一评测集上跑前后对照**（见下节「检索评测」）
+
 ## 本地运行
 
 需要 Python 3.13 与 Postgres（含 pgvector）。
