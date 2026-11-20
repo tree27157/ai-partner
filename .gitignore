@@ -7,3 +7,4 @@ sessions/
 .DS_Store
 *.pyc
 chroma_db/
+chroma_db_lc/
